@@ -1,0 +1,23 @@
+qiutan:
+  base_url: "https://www.qiutan.com"
+  # 以下接口地址请先运行发现模式找到实际URL后填写：
+  # python -m src.collectors.qiutan discover "https://www.qiutan.com/match/xxx"
+  match_list_pattern: ""        # 比赛列表接口URL关键词
+  odds_history_pattern: ""      # 赔率历史接口URL关键词
+  live_score_pattern: ""        # 实时比分接口URL关键词
+  headless: true                # false=可见浏览器（调试时用）
+  scan_window_minutes: 90       # 扫描开赛前多少分钟内的比赛
+  page_timeout_ms: 15000        # 页面等待超时（毫秒）
+
+scanner:
+  min_line_depth: 1.0           # 主盘口最低深度（≥1.0球）
+  late_upgrade_window_minutes: 15  # 临场升盘观察窗口（分钟）
+  bookmaker: "bet365"           # 目标庄家
+
+alert:
+  mode: "log"                   # log=本地日志 | telegram=Telegram推送
+  telegram_token: ""            # Telegram Bot Token（预留）
+  telegram_chat_id: ""          # Telegram Chat ID（预留）
+
+db:
+  path: "bettips.db"            # SQLite数据库文件路径
