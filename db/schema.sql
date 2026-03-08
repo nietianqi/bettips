@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS candidates (
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_odds_match_id ON odds_history(match_id);
 CREATE INDEX IF NOT EXISTS idx_odds_ts ON odds_history(ts);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_odds_dedupe
+    ON odds_history(match_id, bookmaker, line_depth, home_gives, home_odds, away_odds, ts);
 CREATE INDEX IF NOT EXISTS idx_events_match_id ON match_events(match_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_events_dedupe
+    ON match_events(match_id, minute, event_type, team);
 CREATE INDEX IF NOT EXISTS idx_matches_kickoff ON matches(kickoff_time);
 CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
