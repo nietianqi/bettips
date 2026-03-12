@@ -11,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
 from src import halftime, scanner, storage
+from src import csv_export
 from src.collectors.base import BaseCollector
 from src.collectors.qiutan import QiutanCollector
 from src.collectors.titan import TitanCollector
@@ -98,13 +99,22 @@ async def collect_odds() -> None:
 async def run_pre_match_scan() -> None:
     try:
         cfg = _config.get("scanner", {})
-        scanner.run_pre_match_scan(
+        new_candidates = scanner.run_pre_match_scan(
             db_path=_db_path,
             bookmaker=cfg.get("bookmaker", "bet365"),
             min_depth=float(cfg.get("min_line_depth", 1.0)),
             window_minutes=int(cfg.get("late_upgrade_window_minutes", 15)),
             scan_window=_scan_window_minutes(),
         )
+        if new_candidates:
+            rows = []
+            for c in new_candidates:
+                match = storage.get_match(_db_path, c["match_id"])
+                if not match:
+                    continue
+                rows.append({**match, **c})
+            if rows:
+                csv_export.write_match_signals(rows, "pre_match_candidate", _config.get("output", {}))
     except Exception as exc:
         logger.error(f"pre-match scan failed: {exc}")
 
@@ -114,6 +124,14 @@ async def run_halftime_check() -> None:
         alerted = halftime.run_halftime_check(_db_path, _config.get("alert", {}))
         if alerted:
             logger.info(f"Halftime alerts sent: {len(alerted)}")
+            rows = []
+            for match_id in alerted:
+                match = storage.get_match(_db_path, match_id)
+                if not match:
+                    continue
+                rows.append(match)
+            if rows:
+                csv_export.write_match_signals(rows, "ht_alert", _config.get("output", {}))
     except Exception as exc:
         logger.error(f"halftime check failed: {exc}")
 

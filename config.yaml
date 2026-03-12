@@ -35,5 +35,10 @@ alert:
   telegram_token: ""
   telegram_chat_id: ""
 
+output:
+  enabled: true
+  csv_path: "outputs/match_signals.csv"
+  dedupe_keys: ["stage", "match_id"]
+
 db:
   path: "bettips.db"
