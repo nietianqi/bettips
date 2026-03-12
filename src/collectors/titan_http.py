@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import random
+import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import requests
+from loguru import logger
 
 try:
     from zoneinfo import ZoneInfo
@@ -20,6 +22,18 @@ MOBILE_SAFARI_UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"
 )
+
+MOBILE_CHROME_ANDROID_UA = (
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
+)
+
+MOBILE_EDGE_ANDROID_UA = (
+    "Mozilla/5.0 (Linux; Android 13; SM-G996B) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36 EdgA/121.0.0.0"
+)
+
+DEFAULT_UA_POOL = [MOBILE_SAFARI_UA, MOBILE_CHROME_ANDROID_UA, MOBILE_EDGE_ANDROID_UA]
 
 _CN_TZ = ZoneInfo("Asia/Shanghai") if ZoneInfo is not None else timezone(timedelta(hours=8))
 
@@ -121,10 +135,36 @@ class TitanHttpClient:
         self,
         base_url: str = "https://m.titan007.com",
         timeout: int = 20,
-        user_agent: str = MOBILE_SAFARI_UA,
+        user_agent: Optional[str] = None,
+        user_agent_pool: Optional[list[str]] = None,
+        min_interval_ms: int = 800,
+        random_delay_min_ms: int = 120,
+        random_delay_max_ms: int = 420,
+        retry_attempts: int = 3,
+        retry_backoff_seconds: float = 1.2,
+        retry_jitter_seconds: float = 0.6,
+        warmup_interval_seconds: int = 900,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.retry_attempts = max(1, int(retry_attempts))
+        self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+        self.retry_jitter_seconds = max(0.0, float(retry_jitter_seconds))
+        self.min_interval_seconds = max(0.0, int(min_interval_ms) / 1000.0)
+        self.random_delay_min_seconds = max(0.0, int(random_delay_min_ms) / 1000.0)
+        self.random_delay_max_seconds = max(
+            self.random_delay_min_seconds,
+            int(random_delay_max_ms) / 1000.0,
+        )
+        self.warmup_interval_seconds = max(0, int(warmup_interval_seconds))
+        self._rate_lock = threading.Lock()
+        self._last_request_at = 0.0
+        self._last_warmup_at = 0.0
+
+        pool = [ua for ua in (user_agent_pool or DEFAULT_UA_POOL) if ua]
+        self._user_agent_pool = pool if pool else [MOBILE_SAFARI_UA]
+        self._active_user_agent = user_agent or random.choice(self._user_agent_pool)
+
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -132,12 +172,98 @@ class TitanHttpClient:
                 "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
                 "cache-control": "no-cache",
                 "pragma": "no-cache",
-                "user-agent": user_agent,
+                "user-agent": self._active_user_agent,
             }
         )
 
     def close(self) -> None:
         self.session.close()
+
+    def _apply_rate_limit(self) -> None:
+        with self._rate_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_request_at
+            if elapsed < self.min_interval_seconds:
+                time.sleep(self.min_interval_seconds - elapsed)
+            if self.random_delay_max_seconds > 0:
+                jitter = random.uniform(self.random_delay_min_seconds, self.random_delay_max_seconds)
+                if jitter > 0:
+                    time.sleep(jitter)
+            self._last_request_at = time.monotonic()
+
+    def _rotate_user_agent(self) -> None:
+        if not self._user_agent_pool:
+            return
+        if len(self._user_agent_pool) == 1:
+            self._active_user_agent = self._user_agent_pool[0]
+        else:
+            choices = [ua for ua in self._user_agent_pool if ua != self._active_user_agent]
+            self._active_user_agent = random.choice(choices) if choices else self._active_user_agent
+        self.session.headers["user-agent"] = self._active_user_agent
+
+    def _maybe_warmup(self) -> None:
+        if self.warmup_interval_seconds <= 0:
+            return
+        now = time.monotonic()
+        if now - self._last_warmup_at < self.warmup_interval_seconds:
+            return
+        self._last_warmup_at = now
+        try:
+            self.session.get(
+                f"{self.base_url}/",
+                headers={"referer": f"{self.base_url}/"},
+                timeout=max(5, min(self.timeout, 10)),
+            )
+        except Exception:
+            # Warmup is best-effort only.
+            pass
+
+    def _request(
+        self,
+        path: str,
+        params: Optional[dict] = None,
+        headers: Optional[dict] = None,
+    ) -> requests.Response:
+        url = f"{self.base_url}{path}"
+        final_headers = headers or {}
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(1, self.retry_attempts + 1):
+            self._apply_rate_limit()
+            self._maybe_warmup()
+            try:
+                response = self.session.get(
+                    url,
+                    params=params,
+                    headers=final_headers,
+                    timeout=self.timeout,
+                )
+                if response.status_code in (403, 429):
+                    raise requests.HTTPError(
+                        f"Blocked with status {response.status_code}",
+                        response=response,
+                    )
+                response.raise_for_status()
+                return response
+            except Exception as exc:
+                last_exc = exc
+                blocked = False
+                if isinstance(exc, requests.HTTPError) and exc.response is not None:
+                    blocked = exc.response.status_code in (403, 429, 503)
+                if blocked:
+                    self._rotate_user_agent()
+                if attempt >= self.retry_attempts:
+                    break
+                sleep_s = self.retry_backoff_seconds * (2 ** (attempt - 1))
+                sleep_s += random.uniform(0, self.retry_jitter_seconds)
+                logger.warning(
+                    f"Titan request retry {attempt}/{self.retry_attempts} path={path} "
+                    f"reason={type(exc).__name__} sleep={sleep_s:.2f}s"
+                )
+                time.sleep(sleep_s)
+
+        assert last_exc is not None
+        raise last_exc
 
     def fetch_goal3_xml(self, flesh: Optional[str] = None, cookies: str | dict[str, str] | None = None) -> str:
         """Fetch odds snapshot XML from /txt/goal3.xml."""
@@ -149,13 +275,11 @@ class TitanHttpClient:
         if cookie_header:
             headers["cookie"] = cookie_header
 
-        response = self.session.get(
-            f"{self.base_url}/txt/goal3.xml",
+        response = self._request(
+            "/txt/goal3.xml",
             params={"flesh": flesh},
             headers=headers,
-            timeout=self.timeout,
         )
-        response.raise_for_status()
         return response.text
 
     def fetch_schedule_text(
@@ -170,12 +294,10 @@ class TitanHttpClient:
         if cookie_header:
             headers["cookie"] = cookie_header
 
-        response = self.session.get(
-            f"{self.base_url}/phone/Schedule_{language}_{score_type}.txt",
+        response = self._request(
+            f"/phone/Schedule_{language}_{score_type}.txt",
             headers=headers,
-            timeout=self.timeout,
         )
-        response.raise_for_status()
         return response.text
 
     def fetch_handicap_companies(
@@ -192,8 +314,8 @@ class TitanHttpClient:
         if cookie_header:
             headers["cookie"] = cookie_header
 
-        response = self.session.get(
-            f"{self.base_url}/HandicapDataInterface.ashx",
+        response = self._request(
+            "/HandicapDataInterface.ashx",
             params={
                 "scheid": scheid,
                 "type": type_,
@@ -201,9 +323,7 @@ class TitanHttpClient:
                 "isHalf": is_half,
             },
             headers=headers,
-            timeout=self.timeout,
         )
-        response.raise_for_status()
         return response.json()
 
     def fetch_handicap_history(
@@ -225,8 +345,8 @@ class TitanHttpClient:
         if cookie_header:
             headers["cookie"] = cookie_header
 
-        response = self.session.get(
-            f"{self.base_url}/HandicapDataInterface.ashx",
+        response = self._request(
+            "/HandicapDataInterface.ashx",
             params={
                 "scheid": scheid,
                 "type": type_,
@@ -236,9 +356,7 @@ class TitanHttpClient:
                 "flesh": flesh,
             },
             headers=headers,
-            timeout=self.timeout,
         )
-        response.raise_for_status()
         return response.json()
 
 

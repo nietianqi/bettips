@@ -1,14 +1,23 @@
 runtime:
   collector: "titan" # titan | qiutan
+  max_odds_requests_per_round: 40
 
 titan:
   base_url: "https://m.titan007.com"
   timeout_seconds: 20
+  min_interval_ms: 800
+  random_delay_min_ms: 120
+  random_delay_max_ms: 420
+  retry_attempts: 3
+  retry_backoff_seconds: 1.2
+  retry_jitter_seconds: 0.6
+  warmup_interval_seconds: 900
   score_type: 0
   language: 0
   scan_window_minutes: 90
   max_matches_per_round: 0 # 0 = no limit
   oddsid_ttl_seconds: 21600
+  oddsid_missing_ttl_seconds: 1800
   bet365_line_num_prefer: 4
   cookie: ""
 
@@ -39,6 +48,12 @@ output:
   enabled: true
   csv_path: "outputs/match_signals.csv"
   dedupe_keys: ["stage", "match_id"]
+
+scheduler:
+  collect_odds_seconds: 300
+  pre_match_scan_seconds: 300
+  halftime_check_seconds: 180
+  jitter_seconds: 15
 
 db:
   path: "bettips.db"

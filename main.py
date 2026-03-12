@@ -49,6 +49,16 @@ def _build_collector() -> BaseCollector:
     return TitanCollector(_config.get("titan", {}))
 
 
+def _scheduler_settings() -> dict:
+    cfg = _config.get("scheduler", {})
+    return {
+        "collect_odds_seconds": int(cfg.get("collect_odds_seconds", 300)),
+        "pre_match_scan_seconds": int(cfg.get("pre_match_scan_seconds", 300)),
+        "halftime_check_seconds": int(cfg.get("halftime_check_seconds", 180)),
+        "jitter_seconds": int(cfg.get("jitter_seconds", 15)),
+    }
+
+
 async def collect_odds() -> None:
     """Fetch match list, odds history and live score updates."""
     try:
@@ -63,9 +73,22 @@ async def collect_odds() -> None:
         for row in watching:
             targets[str(row["id"])] = row
 
-        logger.debug(f"Collect round targets: {len(targets)}")
+        target_items = list(targets.items())
+        max_reqs = int(_config.get("runtime", {}).get("max_odds_requests_per_round", 40))
+        if max_reqs > 0 and len(target_items) > max_reqs:
+            def _priority(item: tuple[str, dict]) -> tuple[int, str, str]:
+                _id, m = item
+                status = str(m.get("status", "")).lower()
+                p = 0 if status in {"live", "halftime"} else 1
+                kickoff = str(m.get("kickoff_time", "9999-12-31 23:59:59"))
+                return (p, kickoff, _id)
 
-        for match_id, match in targets.items():
+            target_items.sort(key=_priority)
+            target_items = target_items[:max_reqs]
+
+        logger.debug(f"Collect round targets: {len(target_items)}")
+
+        for match_id, match in target_items:
             odds_rows = await _collector.fetch_odds_history(match_id) if _collector else []
             for record in odds_rows:
                 storage.insert_odds(_db_path, record)
@@ -163,17 +186,48 @@ async def main() -> None:
                 f"{missing}. Run: python -m src.collectors.qiutan discover <match_url>"
             )
 
+    sched_cfg = _scheduler_settings()
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(collect_odds, "interval", seconds=60, id="collect_odds")
-    scheduler.add_job(run_pre_match_scan, "interval", seconds=60, id="pre_match_scan")
-    scheduler.add_job(run_halftime_check, "interval", seconds=120, id="halftime_check")
+    scheduler.add_job(
+        collect_odds,
+        "interval",
+        seconds=sched_cfg["collect_odds_seconds"],
+        jitter=sched_cfg["jitter_seconds"],
+        max_instances=1,
+        coalesce=True,
+        id="collect_odds",
+    )
+    scheduler.add_job(
+        run_pre_match_scan,
+        "interval",
+        seconds=sched_cfg["pre_match_scan_seconds"],
+        jitter=sched_cfg["jitter_seconds"],
+        max_instances=1,
+        coalesce=True,
+        id="pre_match_scan",
+    )
+    scheduler.add_job(
+        run_halftime_check,
+        "interval",
+        seconds=sched_cfg["halftime_check_seconds"],
+        jitter=sched_cfg["jitter_seconds"],
+        max_instances=1,
+        coalesce=True,
+        id="halftime_check",
+    )
     scheduler.start()
 
     logger.info("=" * 48)
     logger.info("bettips started")
     logger.info(f"collector backend: {backend}")
     logger.info(f"db path: {_db_path}")
-    logger.info("jobs: collect_odds(60s), pre_match_scan(60s), halftime_check(120s)")
+    logger.info(
+        "jobs: "
+        f"collect_odds({sched_cfg['collect_odds_seconds']}s), "
+        f"pre_match_scan({sched_cfg['pre_match_scan_seconds']}s), "
+        f"halftime_check({sched_cfg['halftime_check_seconds']}s), "
+        f"jitter({sched_cfg['jitter_seconds']}s)"
+    )
     logger.info("=" * 48)
 
     await collect_odds()

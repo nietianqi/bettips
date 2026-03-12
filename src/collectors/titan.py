@@ -26,10 +26,18 @@ class TitanCollector(BaseCollector):
         self.client = TitanHttpClient(
             base_url=config.get("base_url", "https://m.titan007.com"),
             timeout=int(config.get("timeout_seconds", 20)),
+            min_interval_ms=int(config.get("min_interval_ms", 800)),
+            random_delay_min_ms=int(config.get("random_delay_min_ms", 120)),
+            random_delay_max_ms=int(config.get("random_delay_max_ms", 420)),
+            retry_attempts=int(config.get("retry_attempts", 3)),
+            retry_backoff_seconds=float(config.get("retry_backoff_seconds", 1.2)),
+            retry_jitter_seconds=float(config.get("retry_jitter_seconds", 0.6)),
+            warmup_interval_seconds=int(config.get("warmup_interval_seconds", 900)),
         )
         self._schedule_map: dict[str, dict] = {}
-        self._oddsid_cache: dict[str, tuple[int, float]] = {}
+        self._oddsid_cache: dict[str, tuple[Optional[int], float]] = {}
         self._oddsid_ttl_seconds = int(config.get("oddsid_ttl_seconds", 6 * 3600))
+        self._oddsid_missing_ttl_seconds = int(config.get("oddsid_missing_ttl_seconds", 1800))
         self._max_matches_per_round = int(config.get("max_matches_per_round", 120))
 
     async def close(self) -> None:
@@ -52,19 +60,19 @@ class TitanCollector(BaseCollector):
         logger.info(f"Titan schedule rows: {len(rows)}")
         return rows
 
-    def _get_cached_oddsid(self, scheid: str) -> Optional[int]:
+    def _get_cached_oddsid(self, scheid: str) -> tuple[bool, Optional[int]]:
         cached = self._oddsid_cache.get(scheid)
         if not cached:
-            return None
+            return False, None
         oddsid, expire_at = cached
         if time.time() >= expire_at:
             self._oddsid_cache.pop(scheid, None)
-            return None
-        return oddsid
+            return False, None
+        return True, oddsid
 
     async def _resolve_oddsid(self, scheid: str) -> Optional[int]:
-        cached = self._get_cached_oddsid(scheid)
-        if cached:
+        hit, cached = self._get_cached_oddsid(scheid)
+        if hit:
             return cached
 
         payload = await asyncio.to_thread(
@@ -81,8 +89,8 @@ class TitanCollector(BaseCollector):
         except (TypeError, ValueError):
             prefer_num = 4
         oddsid = resolve_bet365_oddsid(payload, prefer_num=prefer_num)
-        if oddsid is not None:
-            self._oddsid_cache[scheid] = (oddsid, time.time() + self._oddsid_ttl_seconds)
+        ttl = self._oddsid_ttl_seconds if oddsid is not None else self._oddsid_missing_ttl_seconds
+        self._oddsid_cache[scheid] = (oddsid, time.time() + ttl)
         return oddsid
 
     async def fetch_odds_history(self, match_id: str) -> list[dict]:
