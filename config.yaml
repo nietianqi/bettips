@@ -1,3 +1,17 @@
+runtime:
+  collector: "titan" # titan | qiutan
+
+titan:
+  base_url: "https://m.titan007.com"
+  timeout_seconds: 20
+  score_type: 0
+  language: 0
+  scan_window_minutes: 90
+  max_matches_per_round: 0 # 0 = no limit
+  oddsid_ttl_seconds: 21600
+  bet365_line_num_prefer: 4
+  cookie: ""
+
 qiutan:
   base_url: "https://www.qiutan.com"
   match_list_page: "https://www.qiutan.com/index"

@@ -7,6 +7,8 @@ from src.collectors.titan_http import (
     is_deep_main_line,
     normalize_handicap_history,
     parse_goal3_matches,
+    parse_schedule_matches,
+    resolve_bet365_oddsid,
 )
 
 
@@ -84,3 +86,41 @@ def test_is_deep_main_line():
     assert is_deep_main_line(-1.0) is True
     assert is_deep_main_line(-1.25) is True
     assert is_deep_main_line(-0.75) is False
+
+
+def test_parse_schedule_matches_basic():
+    sample = (
+        "联赛A^113^1^^^^^^!$$"
+        "2950976^113^0^20260313014500^^主队^客队^0^0^0^0^1^0!"
+    )
+    rows = parse_schedule_matches(sample)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == "2950976"
+    assert row["league"] == "联赛A"
+    assert row["status"] == "scheduled"
+    assert row["home_red"] == 1
+    assert row["away_red"] == 0
+
+
+def test_resolve_bet365_oddsid():
+    payload = {
+        "companies": [
+            {"nameCn": "澳门", "details": [{"oddsId": 111}]},
+            {"nameCn": "Bet365", "details": [{"num": 1, "oddsId": 29894153}, {"num": 4, "oddsId": 29894155}]},
+        ]
+    }
+    assert resolve_bet365_oddsid(payload) == 29894155
+
+
+def test_resolve_bet365_masked_company_name():
+    payload = {
+        "companies": [
+            {
+                "companyId": 8,
+                "nameCn": "36*",
+                "details": [{"num": 1, "oddsId": 123}, {"num": 4, "oddsId": 456}],
+            }
+        ]
+    }
+    assert resolve_bet365_oddsid(payload, prefer_num=4) == 456
