@@ -11,6 +11,8 @@ def check_candidate(db_path: str, match: dict, alert_config: dict | None = None)
     """Check one candidate match at halftime."""
     match_id = str(match["id"])
     status = str(match.get("status", "")).lower()
+    cfg = alert_config or {}
+    fallback_over1_enabled = bool(cfg.get("fallback_over1_enabled", True))
 
     if status in {"finished", "ft"}:
         storage.update_candidate_status(db_path, match_id, "dismissed")
@@ -18,26 +20,8 @@ def check_candidate(db_path: str, match: dict, alert_config: dict | None = None)
     if status != "halftime":
         return False
 
-    ht_home = match.get("ht_home")
-    ht_away = match.get("ht_away")
-    if ht_home is None or ht_away is None:
-        logger.debug(f"[{match_id}] halftime score missing")
-        return False
-
-    if int(ht_home) != 0 or int(ht_away) != 0:
-        logger.info(f"[{match_id}] halftime {ht_home}:{ht_away}, remove candidate")
-        storage.update_candidate_status(db_path, match_id, "dismissed")
-        return False
-
-    events = storage.get_events(db_path, match_id)
-    first_half_red_cards = [
-        event
-        for event in events
-        if event.get("event_type") == "red_card" and int(event.get("minute") or 0) <= 55
-    ]
-    if first_half_red_cards:
-        logger.info(f"[{match_id}] first-half red card, remove candidate")
-        storage.update_candidate_status(db_path, match_id, "dismissed")
+    if not fallback_over1_enabled:
+        logger.debug(f"[{match_id}] fallback_over1 disabled, skip")
         return False
 
     alert.send_ht_alert(match, alert_config)

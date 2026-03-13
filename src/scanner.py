@@ -8,7 +8,6 @@ from typing import Optional
 from loguru import logger
 
 from src import storage
-from src.normalizer import is_deep_main_line
 from src.timeutils import parse_datetime
 
 
@@ -81,11 +80,12 @@ def has_first_time_late_upgrade(
 def scan_match(
     db_path: str,
     match: dict,
-    bookmaker: str = "bet365",
+    bookmaker: str = "bet365_pan4",
+    main_bookmaker: str = "bet365_main",
     min_depth: float = 1.0,
     window_minutes: int = 15,
 ) -> Optional[dict]:
-    """Run pre-match rules on one match."""
+    """Run pre-match scan on one match."""
     match_id = str(match["id"])
     kickoff = parse_datetime(match.get("kickoff_time"))
     if kickoff is None:
@@ -95,46 +95,60 @@ def scan_match(
     if storage.is_candidate(db_path, match_id):
         return None
 
-    history = storage.get_odds_history(db_path, match_id, bookmaker)
-    cleaned = _clean_history(history, kickoff)
-    if not cleaned:
-        logger.debug(f"[{match_id}] no valid odds history, skip")
+    signal_history = storage.get_odds_history(db_path, match_id, bookmaker)
+    cleaned_signal = _clean_history(signal_history, kickoff)
+    if not cleaned_signal and bookmaker == "bet365_pan4":
+        # Backward compatibility for historical data written as "bet365".
+        signal_history = storage.get_odds_history(db_path, match_id, "bet365")
+        cleaned_signal = _clean_history(signal_history, kickoff)
+    if not cleaned_signal:
+        logger.debug(f"[{match_id}] no valid signal history ({bookmaker}), skip")
         return None
 
-    latest = cleaned[-1]
-    current_depth = float(latest["line_depth"])
-    home_gives = bool(latest["home_gives"])
-    if not home_gives:
-        logger.debug(f"[{match_id}] latest line is away-gives, skip")
-        return None
-    if not is_deep_main_line(current_depth, min_depth):
-        logger.debug(f"[{match_id}] depth {current_depth} < {min_depth}, skip")
+    main_history = storage.get_odds_history(db_path, match_id, main_bookmaker)
+    cleaned_main = _clean_history(main_history, kickoff)
+    if not cleaned_main and main_bookmaker == "bet365_main":
+        # Fallback to signal line when dedicated main line is unavailable.
+        cleaned_main = cleaned_signal
+    if not cleaned_main:
+        logger.debug(f"[{match_id}] no valid main history ({main_bookmaker}), skip")
         return None
 
-    triggered, upgrade_record = has_first_time_late_upgrade(cleaned, kickoff, window_minutes)
+    main_depth = float(cleaned_main[-1]["line_depth"])
+    if main_depth < float(min_depth):
+        logger.debug(f"[{match_id}] main depth {main_depth} < {min_depth}, skip")
+        return None
+
+    triggered, upgrade_record = has_first_time_late_upgrade(cleaned_signal, kickoff, window_minutes)
     if not triggered or upgrade_record is None:
-        logger.debug(f"[{match_id}] no first-time late upgrade")
+        logger.debug(f"[{match_id}] no first-time late upgrade on {bookmaker}")
         return None
+
+    side = "home" if bool(upgrade_record.get("home_gives", 1)) else "away"
+    trigger_depth = float(upgrade_record["line_depth"])
+    prev_depth = float(upgrade_record["prev_depth"])
+    upgrade_ts = upgrade_record["ts"].isoformat(sep=" ", timespec="seconds")
 
     home = match.get("home_team", "?")
     away = match.get("away_team", "?")
     league = match.get("league", "?")
     logger.info(
         f"[Pre-match candidate] {league} | {home} vs {away} | "
-        f"{upgrade_record['prev_depth']} -> {upgrade_record['line_depth']} first-time"
+        f"main>={min_depth} ok | {bookmaker} {side}-gives {prev_depth}->{trigger_depth} @ {upgrade_ts}"
     )
 
     return {
         "match_id": match_id,
-        "trigger_depth": float(upgrade_record["line_depth"]),
-        "prev_depth": float(upgrade_record["prev_depth"]),
-        "upgrade_ts": upgrade_record["ts"].isoformat(sep=" ", timespec="seconds"),
+        "trigger_depth": trigger_depth,
+        "prev_depth": prev_depth,
+        "upgrade_ts": upgrade_ts,
     }
 
 
 def run_pre_match_scan(
     db_path: str,
-    bookmaker: str = "bet365",
+    bookmaker: str = "bet365_pan4",
+    main_bookmaker: str = "bet365_main",
     min_depth: float = 1.0,
     window_minutes: int = 15,
     scan_window: int = 90,
@@ -144,7 +158,14 @@ def run_pre_match_scan(
     new_candidates: list[dict] = []
 
     for match in upcoming:
-        result = scan_match(db_path, match, bookmaker, min_depth, window_minutes)
+        result = scan_match(
+            db_path=db_path,
+            match=match,
+            bookmaker=bookmaker,
+            main_bookmaker=main_bookmaker,
+            min_depth=min_depth,
+            window_minutes=window_minutes,
+        )
         if result:
             storage.add_candidate(db_path, result)
             new_candidates.append(result)

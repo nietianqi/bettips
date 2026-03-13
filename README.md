@@ -2,15 +2,15 @@
 
 ## 策略说明
 
-**"深盘临场首次升深 + 半场0:0 → HT大1候选"**
+**"深盘临场首次升盘(盘4) + 半场fallback → HT大1候选"**
 
 | 阶段 | 条件 |
 |------|------|
-| 赛前 | bet365主让盘口 ≥ 1球 |
-| 赛前 | 开赛前15分钟内出现"首次升深"（盘口变更深，且该深度历史上从未出现） |
-| 半场 | 上半场比分 0:0 |
-| 半场 | 上半场无红牌 |
-| 结论 | 触发提醒：考虑下半场大1 |
+| 赛前 | bet365主盘（默认盘1）让球深度绝对值 ≥ 1球 |
+| 赛前 | 仅分析 bet365 盘(4)（默认num=4） |
+| 赛前 | 开赛前15分钟内出现升盘，且新盘口为历史首次出现 |
+| 半场 | 若上半场未进场，则触发 fallback 动作 |
+| 结论 | 触发提醒：考虑下半场大1（可开关） |
 
 ---
 
@@ -46,6 +46,19 @@ qiutan:
   match_list_pattern: "/api/match/list"      # 替换为实际发现的URL片段
   odds_history_pattern: "/api/odds/history"
   live_score_pattern: "/api/score/live"
+
+titan:
+  bet365_main_line_num: 1
+  bet365_signal_line_num: 4
+
+scanner:
+  bookmaker: "bet365_pan4"
+  main_bookmaker: "bet365_main"
+  min_line_depth: 1.0
+  late_upgrade_window_minutes: 15
+
+alert:
+  fallback_over1_enabled: true
 ```
 
 ### 4. 运行
@@ -59,8 +72,8 @@ python main.py
 ```
 [HT大1候选] 19:50 巴萨 vs 皇马 (西甲)
 盘口路径: 主让1.0 → 19:48升至1.25 (首次出现)
-半场: 0:0 | 红牌: 无
-建议关注: 下半场大1
+半场: fallback触发
+建议关注: 下半场大1（可配置开关）
 ```
 
 ---
@@ -75,9 +88,9 @@ bettips/
 ├── src/
 │   ├── storage.py            # SQLite数据库操作
 │   ├── normalizer.py         # 盘口字符串→浮点数标准化
-│   ├── scanner.py            # 赛前规则引擎（首次升深识别）
-│   ├── halftime.py           # 半场确认引擎
-│   ├── alert.py              # 提醒接口（日志/Telegram）
+│   ├── scanner.py            # 赛前规则引擎（深盘 + 盘4首次升盘）
+│   ├── halftime.py           # 半场fallback引擎
+│   ├── alert.py              # 提醒接口（日志/Telegram/飞书）
 │   └── collectors/
 │       ├── base.py           # 抽象基类
 │       └── qiutan.py         # Playwright球探网爬取器
@@ -85,7 +98,7 @@ bettips/
 │   └── schema.sql            # 数据库建表SQL
 └── tests/
     ├── test_normalizer.py    # 盘口标准化单元测试
-    └── test_scanner.py       # 首次升深算法单元测试
+    └── test_scanner.py       # 赛前信号算法单元测试
 ```
 
 ---
@@ -101,6 +114,17 @@ alert:
   mode: "telegram"
   telegram_token: "你的Token"
   telegram_chat_id: "你的ChatID"
+```
+
+## 飞书推送配置（可选）
+
+1. 在飞书群添加“自定义机器人”，复制 Webhook 地址
+2. 在 `config.yaml` 中填入：
+
+```yaml
+alert:
+  mode: "feishu"
+  feishu_webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/你的Webhook"
 ```
 
 ---
@@ -136,3 +160,4 @@ alert:
 ```bash
 pytest tests/ -v
 ```
+

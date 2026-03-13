@@ -124,7 +124,8 @@ async def run_pre_match_scan() -> None:
         cfg = _config.get("scanner", {})
         new_candidates = scanner.run_pre_match_scan(
             db_path=_db_path,
-            bookmaker=cfg.get("bookmaker", "bet365"),
+            bookmaker=cfg.get("bookmaker", "bet365_pan4"),
+            main_bookmaker=cfg.get("main_bookmaker", "bet365_main"),
             min_depth=float(cfg.get("min_line_depth", 1.0)),
             window_minutes=int(cfg.get("late_upgrade_window_minutes", 15)),
             scan_window=_scan_window_minutes(),

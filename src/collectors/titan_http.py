@@ -490,51 +490,67 @@ def parse_schedule_matches(schedule_text: str) -> list[dict]:
     return matches
 
 
-def resolve_bet365_oddsid(companies_payload: dict, prefer_num: Optional[int] = 4) -> Optional[int]:
-    """Resolve bet365 oddsId from type=1 company payload."""
+def _is_bet365_company(company: dict) -> bool:
+    company_id = _to_int(company.get("companyId"))
+    name = str(company.get("nameCn") or company.get("nameEn") or company.get("name") or "").lower()
+    if "365" in name:
+        return True
+    # Titan mobile often masks company names, e.g. "36*".
+    if name.startswith("36"):
+        return True
+    if company_id == 8:
+        return True
+    return False
+
+
+def resolve_bet365_oddsids(companies_payload: dict) -> dict[int, int]:
+    """Resolve all available bet365 sub-line num -> oddsId mappings."""
     companies = companies_payload.get("companies", [])
     if not isinstance(companies, list):
-        return None
-
-    def _is_bet365(company: dict) -> bool:
-        company_id = _to_int(company.get("companyId"))
-        name = str(company.get("nameCn") or company.get("nameEn") or company.get("name") or "").lower()
-        if "365" in name:
-            return True
-        # Titan mobile often masks company names, e.g. "36*".
-        if name.startswith("36"):
-            return True
-        if company_id == 8:
-            return True
-        return False
+        return {}
 
     for company in companies:
-        if not _is_bet365(company):
+        if not _is_bet365_company(company):
             continue
 
         details = company.get("details", [])
         if not isinstance(details, list) or not details:
             continue
 
-        selected = None
-        if prefer_num is not None:
-            for row in details:
-                if _to_int(row.get("num")) == int(prefer_num):
-                    selected = row
-                    break
-        if selected is None:
-            for row in details:
-                if _to_int(row.get("num")) == 1:
-                    selected = row
-                    break
-        if selected is None:
-            # Prefer the latest/sub-line by the biggest num.
-            selected = sorted(details, key=lambda x: _to_int(x.get("num")) or 0, reverse=True)[0]
-        if selected is None:
-            selected = details[0]
-        odds_id = _to_int(selected.get("oddsId"))
-        if odds_id is not None:
-            return odds_id
+        resolved: dict[int, int] = {}
+        for row in details:
+            num = _to_int(row.get("num"))
+            odds_id = _to_int(row.get("oddsId"))
+            if num is None or odds_id is None:
+                continue
+            # Keep first seen mapping for stable preference.
+            if num not in resolved:
+                resolved[num] = odds_id
+        if resolved:
+            return resolved
+    return {}
+
+
+def resolve_bet365_oddsid(companies_payload: dict, prefer_num: Optional[int] = 4) -> Optional[int]:
+    """Resolve bet365 oddsId from type=1 company payload."""
+    resolved = resolve_bet365_oddsids(companies_payload)
+    if not resolved:
+        return None
+
+    if prefer_num is not None:
+        try:
+            prefer_key = int(prefer_num)
+        except (TypeError, ValueError):
+            prefer_key = None
+        if prefer_key is not None and prefer_key in resolved:
+            return resolved[prefer_key]
+
+    if 1 in resolved:
+        return resolved[1]
+
+    latest_num = max(resolved.keys())
+    if latest_num in resolved:
+        return resolved[latest_num]
     return None
 
 

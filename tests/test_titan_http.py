@@ -9,6 +9,7 @@ from src.collectors.titan_http import (
     parse_goal3_matches,
     parse_schedule_matches,
     resolve_bet365_oddsid,
+    resolve_bet365_oddsids,
 )
 
 
@@ -111,6 +112,19 @@ def test_resolve_bet365_oddsid():
         ]
     }
     assert resolve_bet365_oddsid(payload) == 29894155
+
+
+def test_resolve_bet365_oddsids_all_lines():
+    payload = {
+        "companies": [
+            {
+                "companyId": 8,
+                "nameCn": "36*",
+                "details": [{"num": 1, "oddsId": 123}, {"num": 4, "oddsId": 456}, {"num": 5, "oddsId": 789}],
+            }
+        ]
+    }
+    assert resolve_bet365_oddsids(payload) == {1: 123, 4: 456, 5: 789}
 
 
 def test_resolve_bet365_masked_company_name():

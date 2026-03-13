@@ -18,7 +18,9 @@ titan:
   max_matches_per_round: 0 # 0 = no limit
   oddsid_ttl_seconds: 21600
   oddsid_missing_ttl_seconds: 1800
-  bet365_line_num_prefer: 4
+  bet365_main_line_num: 1
+  bet365_signal_line_num: 4
+  bet365_line_num_prefer: 4 # backward-compatible fallback
   cookie: ""
 
 qiutan:
@@ -37,12 +39,15 @@ qiutan:
 scanner:
   min_line_depth: 1.0
   late_upgrade_window_minutes: 15
-  bookmaker: "bet365"
+  bookmaker: "bet365_pan4"
+  main_bookmaker: "bet365_main"
 
 alert:
-  mode: "log" # log | telegram
+  mode: "log" # log | telegram | feishu
   telegram_token: ""
   telegram_chat_id: ""
+  feishu_webhook: ""
+  fallback_over1_enabled: true
 
 output:
   enabled: true

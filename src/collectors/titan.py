@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime
-from typing import Optional
 
 from loguru import logger
 
@@ -14,7 +13,7 @@ from src.collectors.titan_http import (
     TitanHttpClient,
     normalize_handicap_history,
     parse_schedule_matches,
-    resolve_bet365_oddsid,
+    resolve_bet365_oddsids,
 )
 
 
@@ -35,7 +34,7 @@ class TitanCollector(BaseCollector):
             warmup_interval_seconds=int(config.get("warmup_interval_seconds", 900)),
         )
         self._schedule_map: dict[str, dict] = {}
-        self._oddsid_cache: dict[str, tuple[Optional[int], float]] = {}
+        self._oddsid_cache: dict[str, tuple[dict[int, int], float]] = {}
         self._oddsid_ttl_seconds = int(config.get("oddsid_ttl_seconds", 6 * 3600))
         self._oddsid_missing_ttl_seconds = int(config.get("oddsid_missing_ttl_seconds", 1800))
         self._max_matches_per_round = int(config.get("max_matches_per_round", 120))
@@ -60,18 +59,18 @@ class TitanCollector(BaseCollector):
         logger.info(f"Titan schedule rows: {len(rows)}")
         return rows
 
-    def _get_cached_oddsid(self, scheid: str) -> tuple[bool, Optional[int]]:
+    def _get_cached_oddsids(self, scheid: str) -> tuple[bool, dict[int, int]]:
         cached = self._oddsid_cache.get(scheid)
         if not cached:
-            return False, None
-        oddsid, expire_at = cached
+            return False, {}
+        oddsids, expire_at = cached
         if time.time() >= expire_at:
             self._oddsid_cache.pop(scheid, None)
-            return False, None
-        return True, oddsid
+            return False, {}
+        return True, oddsids
 
-    async def _resolve_oddsid(self, scheid: str) -> Optional[int]:
-        hit, cached = self._get_cached_oddsid(scheid)
+    async def _resolve_oddsids(self, scheid: str) -> dict[int, int]:
+        hit, cached = self._get_cached_oddsids(scheid)
         if hit:
             return cached
 
@@ -83,54 +82,83 @@ class TitanCollector(BaseCollector):
             1,
             self.config.get("cookie"),
         )
-        prefer_num = self.config.get("bet365_line_num_prefer", 4)
+        oddsids = resolve_bet365_oddsids(payload)
+        ttl = self._oddsid_ttl_seconds if oddsids else self._oddsid_missing_ttl_seconds
+        self._oddsid_cache[scheid] = (oddsids, time.time() + ttl)
+        return oddsids
+
+    @staticmethod
+    def _as_int(value: object, default: int) -> int:
         try:
-            prefer_num = int(prefer_num) if prefer_num is not None else None
+            return int(value)
         except (TypeError, ValueError):
-            prefer_num = 4
-        oddsid = resolve_bet365_oddsid(payload, prefer_num=prefer_num)
-        ttl = self._oddsid_ttl_seconds if oddsid is not None else self._oddsid_missing_ttl_seconds
-        self._oddsid_cache[scheid] = (oddsid, time.time() + ttl)
-        return oddsid
+            return default
 
     async def fetch_odds_history(self, match_id: str) -> list[dict]:
-        oddsid = await self._resolve_oddsid(str(match_id))
-        if oddsid is None:
-            logger.debug(f"[{match_id}] bet365 oddsid not found")
+        oddsids = await self._resolve_oddsids(str(match_id))
+        if not oddsids:
+            logger.debug(f"[{match_id}] bet365 oddsids not found")
             return []
 
-        payload = await asyncio.to_thread(
-            self.client.fetch_handicap_history,
-            int(match_id),
-            int(oddsid),
-            2,
-            0,
-            0,
-            None,
-            self.config.get("cookie"),
+        main_num = self._as_int(self.config.get("bet365_main_line_num", 1), 1)
+        signal_num = self._as_int(
+            self.config.get("bet365_signal_line_num", self.config.get("bet365_line_num_prefer", 4)),
+            4,
         )
-        rows = normalize_handicap_history(payload, fill_missing_draw_odds=False)
+
+        line_tags_by_num: dict[int, list[str]] = {}
+        for tag, num in (("bet365_main", main_num), ("bet365_pan4", signal_num)):
+            if num not in line_tags_by_num:
+                line_tags_by_num[num] = []
+            if tag not in line_tags_by_num[num]:
+                line_tags_by_num[num].append(tag)
 
         records: list[dict] = []
-        for row in rows:
-            draw = row.get("draw_odds")
-            ts = row.get("modify_ts")
-            if draw is None or ts is None:
+
+        for line_num, tags in line_tags_by_num.items():
+            oddsid = oddsids.get(int(line_num))
+            if oddsid is None:
+                logger.debug(f"[{match_id}] bet365 line num={line_num} oddsid not found")
                 continue
-            home_gives = 1 if float(draw) <= 0 else 0
-            depth = abs(float(draw))
-            ts_iso = datetime.utcfromtimestamp(int(ts)).isoformat(sep=" ", timespec="seconds")
-            records.append(
-                {
-                    "match_id": str(match_id),
-                    "bookmaker": "bet365",
-                    "line_depth": depth,
-                    "home_gives": home_gives,
-                    "home_odds": row.get("home_odds"),
-                    "away_odds": row.get("away_odds"),
-                    "ts": ts_iso,
-                }
+
+            payload = await asyncio.to_thread(
+                self.client.fetch_handicap_history,
+                int(match_id),
+                int(oddsid),
+                2,
+                0,
+                0,
+                None,
+                self.config.get("cookie"),
             )
+            rows = normalize_handicap_history(payload, fill_missing_draw_odds=False)
+
+            bookmakers = list(tags)
+            # Keep legacy alias for existing query defaults.
+            if "bet365_pan4" in tags and "bet365" not in bookmakers:
+                bookmakers.append("bet365")
+
+            for row in rows:
+                draw = row.get("draw_odds")
+                ts = row.get("modify_ts")
+                if draw is None or ts is None:
+                    continue
+                home_gives = 1 if float(draw) <= 0 else 0
+                depth = abs(float(draw))
+                ts_iso = datetime.utcfromtimestamp(int(ts)).isoformat(sep=" ", timespec="seconds")
+                for bookmaker in bookmakers:
+                    records.append(
+                        {
+                            "match_id": str(match_id),
+                            "bookmaker": bookmaker,
+                            "line_depth": depth,
+                            "home_gives": home_gives,
+                            "home_odds": row.get("home_odds"),
+                            "away_odds": row.get("away_odds"),
+                            "ts": ts_iso,
+                        }
+                    )
+
         return records
 
     async def fetch_live_data(self, match_id: str) -> dict:
