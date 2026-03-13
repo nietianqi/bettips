@@ -34,6 +34,12 @@ MOBILE_EDGE_ANDROID_UA = (
 )
 
 DEFAULT_UA_POOL = [MOBILE_SAFARI_UA, MOBILE_CHROME_ANDROID_UA, MOBILE_EDGE_ANDROID_UA]
+DEFAULT_ACCEPT_LANGUAGE_POOL = [
+    "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "zh-CN,zh;q=0.9,zh-TW;q=0.8,en;q=0.6",
+    "en-US,en;q=0.9,zh-CN;q=0.7",
+]
+BLOCK_STATUS_CODES = {403, 418, 429, 451, 503, 520, 521, 522, 523, 524}
 
 _CN_TZ = ZoneInfo("Asia/Shanghai") if ZoneInfo is not None else timezone(timedelta(hours=8))
 
@@ -64,6 +70,36 @@ def _cookie_header(cookies: str | dict[str, str] | None) -> Optional[str]:
     if isinstance(cookies, dict):
         return "; ".join([f"{k}={v}" for k, v in cookies.items()])
     return None
+
+
+def _parse_proxy_pool(value: Any) -> list[str]:
+    if value is None:
+        return []
+
+    items: list[str] = []
+    if isinstance(value, str):
+        normalized = value.replace(";", ",").replace("\n", ",")
+        items = [x.strip() for x in normalized.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(x).strip() for x in value]
+    else:
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        cleaned.append(item)
+    return cleaned
+
+
+def _is_blocked_status(status_code: Any) -> bool:
+    parsed = _to_int(status_code)
+    if parsed is None:
+        return False
+    return int(parsed) in BLOCK_STATUS_CODES
 
 
 def _parse_ids(text: Optional[str]) -> list[int]:
@@ -144,12 +180,22 @@ class TitanHttpClient:
         retry_backoff_seconds: float = 1.2,
         retry_jitter_seconds: float = 0.6,
         warmup_interval_seconds: int = 900,
+        timeout_jitter_seconds: float = 0.8,
+        rotate_identity_every_requests: int = 12,
+        proxy_pool: Any = None,
+        block_cooldown_seconds: float = 8.0,
+        block_streak_for_cooldown: int = 2,
+        accept_language_pool: Optional[list[str]] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.timeout_jitter_seconds = max(0.0, float(timeout_jitter_seconds))
         self.retry_attempts = max(1, int(retry_attempts))
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
         self.retry_jitter_seconds = max(0.0, float(retry_jitter_seconds))
+        self.rotate_identity_every_requests = max(1, int(rotate_identity_every_requests))
+        self.block_cooldown_seconds = max(0.0, float(block_cooldown_seconds))
+        self.block_streak_for_cooldown = max(1, int(block_streak_for_cooldown))
         self.min_interval_seconds = max(0.0, int(min_interval_ms) / 1000.0)
         self.random_delay_min_seconds = max(0.0, int(random_delay_min_ms) / 1000.0)
         self.random_delay_max_seconds = max(
@@ -160,21 +206,29 @@ class TitanHttpClient:
         self._rate_lock = threading.Lock()
         self._last_request_at = 0.0
         self._last_warmup_at = 0.0
+        self._request_count = 0
+        self._blocked_streak = 0
 
         pool = [ua for ua in (user_agent_pool or DEFAULT_UA_POOL) if ua]
         self._user_agent_pool = pool if pool else [MOBILE_SAFARI_UA]
         self._active_user_agent = user_agent or random.choice(self._user_agent_pool)
+        languages = [x for x in (accept_language_pool or DEFAULT_ACCEPT_LANGUAGE_POOL) if str(x).strip()]
+        self._accept_language_pool = languages if languages else [DEFAULT_ACCEPT_LANGUAGE_POOL[0]]
+        self._active_accept_language = random.choice(self._accept_language_pool)
+        self._proxy_pool = _parse_proxy_pool(proxy_pool)
+        self._active_proxy: Optional[str] = None
 
         self.session = requests.Session()
         self.session.headers.update(
             {
                 "accept": "*/*",
-                "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+                "accept-language": self._active_accept_language,
                 "cache-control": "no-cache",
                 "pragma": "no-cache",
                 "user-agent": self._active_user_agent,
             }
         )
+        self._rotate_proxy(force=True)
 
     def close(self) -> None:
         self.session.close()
@@ -201,6 +255,60 @@ class TitanHttpClient:
             self._active_user_agent = random.choice(choices) if choices else self._active_user_agent
         self.session.headers["user-agent"] = self._active_user_agent
 
+    def _rotate_accept_language(self) -> None:
+        if not self._accept_language_pool:
+            return
+        self._active_accept_language = random.choice(self._accept_language_pool)
+        self.session.headers["accept-language"] = self._active_accept_language
+
+    def _rotate_proxy(self, force: bool = False) -> None:
+        if not self._proxy_pool:
+            self._active_proxy = None
+            return
+        if self._active_proxy is None:
+            self._active_proxy = random.choice(self._proxy_pool)
+            return
+        if not force or len(self._proxy_pool) == 1:
+            return
+        choices = [p for p in self._proxy_pool if p != self._active_proxy]
+        self._active_proxy = random.choice(choices) if choices else self._active_proxy
+
+    def _active_proxies(self) -> Optional[dict[str, str]]:
+        if not self._active_proxy:
+            return None
+        return {"http": self._active_proxy, "https": self._active_proxy}
+
+    def _rotate_identity(self, force: bool = False) -> None:
+        should_rotate = force or (self._request_count % self.rotate_identity_every_requests == 0)
+        if should_rotate:
+            self._rotate_user_agent()
+            self._rotate_proxy(force=True)
+        self._rotate_accept_language()
+
+    def _effective_timeout(self) -> float:
+        if self.timeout_jitter_seconds <= 0:
+            return float(self.timeout)
+        low = max(3.0, float(self.timeout) - self.timeout_jitter_seconds)
+        high = max(low, float(self.timeout) + self.timeout_jitter_seconds)
+        return random.uniform(low, high)
+
+    def _is_block_error(self, exc: Exception) -> bool:
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            return _is_blocked_status(exc.response.status_code)
+        if isinstance(exc, requests.exceptions.ProxyError):
+            return True
+        return False
+
+    def _maybe_block_cooldown(self) -> None:
+        if self.block_cooldown_seconds <= 0:
+            return
+        if self._blocked_streak < self.block_streak_for_cooldown:
+            return
+        cooldown = self.block_cooldown_seconds + random.uniform(0, self.retry_jitter_seconds)
+        logger.warning(f"Titan blocked streak={self._blocked_streak}, cooldown={cooldown:.2f}s")
+        time.sleep(cooldown)
+        self._blocked_streak = 0
+
     def _maybe_warmup(self) -> None:
         if self.warmup_interval_seconds <= 0:
             return
@@ -213,6 +321,7 @@ class TitanHttpClient:
                 f"{self.base_url}/",
                 headers={"referer": f"{self.base_url}/"},
                 timeout=max(5, min(self.timeout, 10)),
+                proxies=self._active_proxies(),
             )
         except Exception:
             # Warmup is best-effort only.
@@ -229,6 +338,8 @@ class TitanHttpClient:
         last_exc: Optional[Exception] = None
 
         for attempt in range(1, self.retry_attempts + 1):
+            self._request_count += 1
+            self._rotate_identity(force=attempt > 1)
             self._apply_rate_limit()
             self._maybe_warmup()
             try:
@@ -236,22 +347,24 @@ class TitanHttpClient:
                     url,
                     params=params,
                     headers=final_headers,
-                    timeout=self.timeout,
+                    timeout=self._effective_timeout(),
+                    proxies=self._active_proxies(),
                 )
-                if response.status_code in (403, 429):
+                if _is_blocked_status(response.status_code):
                     raise requests.HTTPError(
                         f"Blocked with status {response.status_code}",
                         response=response,
                     )
                 response.raise_for_status()
+                self._blocked_streak = 0
                 return response
             except Exception as exc:
                 last_exc = exc
-                blocked = False
-                if isinstance(exc, requests.HTTPError) and exc.response is not None:
-                    blocked = exc.response.status_code in (403, 429, 503)
+                blocked = self._is_block_error(exc)
                 if blocked:
-                    self._rotate_user_agent()
+                    self._blocked_streak += 1
+                    self._rotate_identity(force=True)
+                    self._maybe_block_cooldown()
                 if attempt >= self.retry_attempts:
                     break
                 sleep_s = self.retry_backoff_seconds * (2 ** (attempt - 1))

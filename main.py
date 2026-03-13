@@ -138,7 +138,17 @@ async def run_pre_match_scan() -> None:
                     continue
                 rows.append({**match, **c})
             if rows:
-                csv_export.write_match_signals(rows, "pre_match_candidate", _config.get("output", {}))
+                output_cfg = _config.get("output", {})
+                csv_export.write_match_signals(rows, "pre_match_candidate", output_cfg)
+
+                pre_match_enabled = bool(output_cfg.get("pre_match_csv_enabled", True))
+                if pre_match_enabled:
+                    pre_cfg = dict(output_cfg)
+                    pre_cfg["csv_path"] = str(
+                        output_cfg.get("pre_match_csv_path", "outputs/pre_match_candidates.csv")
+                    ).strip() or "outputs/pre_match_candidates.csv"
+                    pre_cfg["dedupe_keys"] = list(output_cfg.get("pre_match_dedupe_keys", ["match_id"]))
+                    csv_export.write_match_signals(rows, "pre_match_candidate", pre_cfg)
     except Exception as exc:
         logger.error(f"pre-match scan failed: {exc}")
 

@@ -32,6 +32,11 @@ class TitanCollector(BaseCollector):
             retry_backoff_seconds=float(config.get("retry_backoff_seconds", 1.2)),
             retry_jitter_seconds=float(config.get("retry_jitter_seconds", 0.6)),
             warmup_interval_seconds=int(config.get("warmup_interval_seconds", 900)),
+            timeout_jitter_seconds=float(config.get("timeout_jitter_seconds", 0.8)),
+            rotate_identity_every_requests=int(config.get("rotate_identity_every_requests", 12)),
+            proxy_pool=config.get("proxy_pool", []),
+            block_cooldown_seconds=float(config.get("block_cooldown_seconds", 8.0)),
+            block_streak_for_cooldown=int(config.get("block_streak_for_cooldown", 2)),
         )
         self._schedule_map: dict[str, dict] = {}
         self._oddsid_cache: dict[str, tuple[dict[int, int], float]] = {}
@@ -69,10 +74,17 @@ class TitanCollector(BaseCollector):
             return False, {}
         return True, oddsids
 
-    async def _resolve_oddsids(self, scheid: str) -> dict[int, int]:
-        hit, cached = self._get_cached_oddsids(scheid)
-        if hit:
-            return cached
+    async def _resolve_oddsids(self, scheid: str, force_refresh: bool = False) -> tuple[dict[int, int], bool]:
+        """
+        Resolve bet365 oddsids for one match.
+
+        Returns:
+            (oddsids, from_cache)
+        """
+        if not force_refresh:
+            hit, cached = self._get_cached_oddsids(scheid)
+            if hit:
+                return cached, True
 
         payload = await asyncio.to_thread(
             self.client.fetch_handicap_companies,
@@ -85,7 +97,7 @@ class TitanCollector(BaseCollector):
         oddsids = resolve_bet365_oddsids(payload)
         ttl = self._oddsid_ttl_seconds if oddsids else self._oddsid_missing_ttl_seconds
         self._oddsid_cache[scheid] = (oddsids, time.time() + ttl)
-        return oddsids
+        return oddsids, False
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -95,10 +107,13 @@ class TitanCollector(BaseCollector):
             return default
 
     async def fetch_odds_history(self, match_id: str) -> list[dict]:
-        oddsids = await self._resolve_oddsids(str(match_id))
+        oddsids, from_cache = await self._resolve_oddsids(str(match_id))
         if not oddsids:
-            logger.debug(f"[{match_id}] bet365 oddsids not found")
-            return []
+            if from_cache:
+                oddsids, _ = await self._resolve_oddsids(str(match_id), force_refresh=True)
+            if not oddsids:
+                logger.debug(f"[{match_id}] bet365 oddsids not found")
+                return []
 
         main_num = self._as_int(self.config.get("bet365_main_line_num", 1), 1)
         signal_num = self._as_int(
@@ -112,6 +127,21 @@ class TitanCollector(BaseCollector):
                 line_tags_by_num[num] = []
             if tag not in line_tags_by_num[num]:
                 line_tags_by_num[num].append(tag)
+
+        # Avoid stale cache when bet365 sub-lines open later:
+        # if required line numbers are missing in cached mapping, force a refresh.
+        missing_line_nums = [num for num in line_tags_by_num.keys() if num not in oddsids]
+        if missing_line_nums and from_cache:
+            refreshed_oddsids, _ = await self._resolve_oddsids(str(match_id), force_refresh=True)
+            if refreshed_oddsids:
+                newly_available = [num for num in missing_line_nums if num in refreshed_oddsids]
+                if newly_available:
+                    logger.debug(f"[{match_id}] refreshed oddsids include lines={newly_available}")
+                oddsids = refreshed_oddsids
+
+        if not oddsids:
+            logger.debug(f"[{match_id}] bet365 oddsids not found")
+            return []
 
         records: list[dict] = []
 

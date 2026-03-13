@@ -3,6 +3,9 @@
 from datetime import datetime, timezone
 
 from src.collectors.titan_http import (
+    TitanHttpClient,
+    _is_blocked_status,
+    _parse_proxy_pool,
     detect_first_late_upgrade,
     is_deep_main_line,
     normalize_handicap_history,
@@ -138,3 +141,32 @@ def test_resolve_bet365_masked_company_name():
         ]
     }
     assert resolve_bet365_oddsid(payload, prefer_num=4) == 456
+
+
+def test_parse_proxy_pool():
+    from_text = _parse_proxy_pool("http://a:1, http://b:2;http://a:1\nhttp://c:3")
+    assert from_text == ["http://a:1", "http://b:2", "http://c:3"]
+    from_list = _parse_proxy_pool(["http://a:1", " ", "http://a:1", "http://b:2"])
+    assert from_list == ["http://a:1", "http://b:2"]
+
+
+def test_is_blocked_status():
+    assert _is_blocked_status(403) is True
+    assert _is_blocked_status("429") is True
+    assert _is_blocked_status(503) is True
+    assert _is_blocked_status(200) is False
+    assert _is_blocked_status(None) is False
+
+
+def test_client_rotates_proxy_when_forced():
+    client = TitanHttpClient(
+        proxy_pool=["http://proxy-a:8000", "http://proxy-b:8000"],
+        block_cooldown_seconds=0,
+    )
+    first = client._active_proxy
+    assert first in {"http://proxy-a:8000", "http://proxy-b:8000"}
+    client._rotate_proxy(force=True)
+    second = client._active_proxy
+    assert second in {"http://proxy-a:8000", "http://proxy-b:8000"}
+    assert second != first
+    client.close()

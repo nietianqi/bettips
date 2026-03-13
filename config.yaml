@@ -12,6 +12,11 @@ titan:
   retry_backoff_seconds: 1.2
   retry_jitter_seconds: 0.6
   warmup_interval_seconds: 900
+  timeout_jitter_seconds: 0.8
+  rotate_identity_every_requests: 12
+  proxy_pool: [] # e.g. ["http://user:pass@ip:port", "http://ip2:port"]
+  block_cooldown_seconds: 8.0
+  block_streak_for_cooldown: 2
   score_type: 0
   language: 0
   scan_window_minutes: 90
@@ -33,12 +38,12 @@ qiutan:
   odds_history_pattern: ""
   live_score_pattern: ""
   headless: true
-  scan_window_minutes: 90
+  scan_window_minutes: 600
   page_timeout_ms: 15000
 
 scanner:
   min_line_depth: 1.0
-  late_upgrade_window_minutes: 15
+  late_upgrade_window_minutes: 100
   bookmaker: "bet365_pan4"
   main_bookmaker: "bet365_main"
 
@@ -53,6 +58,9 @@ output:
   enabled: true
   csv_path: "outputs/match_signals.csv"
   dedupe_keys: ["stage", "match_id"]
+  pre_match_csv_enabled: true
+  pre_match_csv_path: "outputs/pre_match_candidates.csv"
+  pre_match_dedupe_keys: ["match_id"]
 
 scheduler:
   collect_odds_seconds: 300

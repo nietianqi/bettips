@@ -50,6 +50,11 @@ qiutan:
 titan:
   bet365_main_line_num: 1
   bet365_signal_line_num: 4
+  timeout_jitter_seconds: 0.8
+  rotate_identity_every_requests: 12
+  proxy_pool: [] # 可选代理池
+  block_cooldown_seconds: 8.0
+  block_streak_for_cooldown: 2
 
 scanner:
   bookmaker: "bet365_pan4"
@@ -59,6 +64,10 @@ scanner:
 
 alert:
   fallback_over1_enabled: true
+
+output:
+  csv_path: "outputs/match_signals.csv"                  # 现有综合CSV（赛前+半场）
+  pre_match_csv_path: "outputs/pre_match_candidates.csv" # 仅赛前命中
 ```
 
 ### 4. 运行
